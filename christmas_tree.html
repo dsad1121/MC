@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>粉调圣诞树 · Christmas Tree</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; touch-action: none; }
+  #greet {
+    position: fixed; left: 50%; bottom: 7vh; transform: translateX(-50%);
+    text-align: center; pointer-events: none; z-index: 10;
+    opacity: 0; animation: fadeUp 2.2s ease-out 8.8s forwards;
+    user-select: none; -webkit-user-select: none;
+  }
+  #greet .en {
+    font-family: "Brush Script MT", "Segoe Script", "Snell Roundhand", cursive;
+    font-size: clamp(34px, 7vw, 72px); line-height: 1.1;
+    background: linear-gradient(180deg, #fff3c0 0%, #ffd27a 45%, #e8a24b 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    text-shadow: 0 0 24px rgba(255, 200, 110, 0.35);
+  }
+  #greet .cn {
+    margin-top: 6px;
+    font-family: "STKaiti", "KaiTi", "SimSun", serif;
+    font-size: clamp(18px, 3.6vw, 34px); letter-spacing: 0.5em; text-indent: 0.5em;
+    background: linear-gradient(180deg, #ffe9f4 0%, #ffb7d9 60%, #e58ab8 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    text-shadow: 0 0 18px rgba(255, 150, 200, 0.3);
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateX(-50%) translateY(24px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="greet">
+  <div class="en">Merry Christmas</div>
+  <div class="cn">圣诞快乐</div>
+</div>
+<script>
+(function () {
+  /* ================= 基础场景 ================= */
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x000000);
+  scene.fog = new THREE.FogExp2(0x050008, 0.011);
+
+  var camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 300);
+  camera.position.set(0, 5.2, 17);
+  camera.lookAt(0, 4.6, 0);
+
+  var renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  var DPR = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.setPixelRatio(DPR);
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  var isMobile = innerWidth < 600;
+
+  /* ================= 时间轴（开场：双烟花彗星螺旋构成圣诞树） ================= */
+  var BUILD_DUR = 1.7;
+  var COMET_START = 3.6;   // 烟花秀结束后，彗星才从树底出发
+  var COMET_END = 7.2;     // 彗星到达树顶
+  var COMET_TURNS = 5.5;   // 盘绕圈数
+  var BUILD_END = 8.0;     // 星星爆发
+  // 彗星经过高度 y 的时刻（树身在该时刻成型）
+  function passTime(y) {
+    return COMET_START + Math.pow(Math.min(1, y / TREE_H), 0.92) * (COMET_END - COMET_START);
+  }
+
+  /* ================= 工具：柔性光点贴图 ================= */
+  function makeGlowTexture(size) {
+    size = size || 64;
+    var c = document.createElement('canvas');
+    c.width = c.height = size;
+    var g = c.getContext('2d');
+    var grd = g.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+    grd.addColorStop(0, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.35, 'rgba(255,255,255,0.55)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, size, size);
+    var tex = new THREE.CanvasTexture(c);
+    tex.needsUpdate = true;
+    return tex;
+  }
+  var glowTex = makeGlowTexture(64);
+
+  /* ================= 背景粉色星云（开场淡入） ================= */
+  var nebulaMats = [];
+  function addNebula(x, y, z, scale, color, opacity) {
+    var m = new THREE.SpriteMaterial({
+      map: glowTex, color: color, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    m.userData.target = opacity;
+    nebulaMats.push(m);
+    var s = new THREE.Sprite(m);
+    s.position.set(x, y, z);
+    s.scale.set(scale, scale, 1);
+    scene.add(s);
+  }
+  addNebula(-14, 8, -30, 42, 0xff6bb5, 0.10);
+  addNebula(16, 4, -34, 50, 0xb06bff, 0.08);
+  addNebula(0, -4, -26, 44, 0xff9ad5, 0.07);
+
+  /* ================= 通用 shader ================= */
+  var EASE_GLSL = 'float easeOut(float x) { return 1.0 - pow(1.0 - x, 3.0); }';
+  var BUILD_VERTEX = [
+    'attribute vec3 aStart;',
+    'attribute vec3 aColor;',
+    'attribute float aPhase, aSize, aDelay;',
+    'uniform float uTime, uPR, uBuildDur;',
+    'varying vec3 vColor;',
+    'varying float vA;',
+    EASE_GLSL,
+    'void main() {',
+    '  float p = clamp((uTime - aDelay) / uBuildDur, 0.0, 1.0);',
+    '  float e = easeOut(p);',
+    '  vec3 pos = mix(aStart, position, e);',
+    '  float ang = (1.0 - e) * (5.0 + aPhase * 6.0);',
+    '  float ca = cos(ang), sa = sin(ang);',
+    '  pos.xz = mat2(ca, -sa, sa, ca) * pos.xz;',
+    '  pos.y += sin(e * 3.14159) * (1.2 + aPhase * 1.4);',
+    '  vec4 mv = modelViewMatrix * vec4(pos, 1.0);',
+    '  float tw = 0.8 + 0.2 * sin(uTime * 2.0 + aPhase * 20.0);',
+    '  vA = tw * (0.25 + 0.75 * e);',
+    '  vColor = aColor * (1.0 + (1.0 - e) * 1.6);',
+    '  gl_PointSize = aSize * uPR * (350.0 / max(1.0, -mv.z)) * (0.6 + 0.6 * e);',
+    '  gl_Position = projectionMatrix * mv;',
+    '}'
+  ].join('\n');
+  var SOFT_FRAG = [
+    'varying vec3 vColor;',
+    'varying float vA;',
+    'void main() {',
+    '  float d = length(gl_PointCoord - 0.5);',
+    '  float a = smoothstep(0.5, 0.0, d);',
+    '  a = pow(a, 1.6);',
+    '  gl_FragColor = vec4(vColor, a * vA);',
+    '}'
+  ].join('\n');
+  var buildMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPR: { value: DPR }, uBuildDur: { value: BUILD_DUR } },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: BUILD_VERTEX, fragmentShader: SOFT_FRAG
+  });
+
+  function scatterStart(arr, i, rMin, yMin, ySpan) {
+    var sa = Math.random() * Math.PI * 2;
+    var sr = rMin + Math.random() * 14;
+    arr[i*3]   = Math.cos(sa) * sr;
+    arr[i*3+1] = yMin + Math.random() * ySpan;
+    arr[i*3+2] = Math.sin(sa) * sr;
+  }
+
+  /* ================= 树群组（自转） ================= */
+  var treeGroup = new THREE.Group();
+  scene.add(treeGroup);
+
+  var TREE_H = 10, TREE_R = 3.3;
+
+  /* ---------- 分层枝叶树冠（雪霜质感，有轮廓层次） ---------- */
+  var TIERS = 6, TH = TREE_H / TIERS;
+  var BODY_COUNT = isMobile ? 13000 : 20000;
+  var bPos = new Float32Array(BODY_COUNT * 3);
+  var bStart = new Float32Array(BODY_COUNT * 3);
+  var bCol = new Float32Array(BODY_COUNT * 3);
+  var bPhase = new Float32Array(BODY_COUNT);
+  var bSize = new Float32Array(BODY_COUNT);
+  var bDelay = new Float32Array(BODY_COUNT);
+  var cIn = new THREE.Color(0x3d1631);      // 内部深玫红
+  var cFrost = new THREE.Color(0xffe6f3);   // 表层粉霜白
+  var cEdge = new THREE.Color(0xffc4e1);    // 枝层边缘亮粉
+  var bc = new THREE.Color();
+
+  for (var i = 0; i < BODY_COUNT; i++) {
+    var y = Math.pow(Math.random(), 0.72) * (TREE_H - 0.05);
+    var tier = Math.min(TIERS - 1, Math.floor(y / TH));
+    var local = (y - tier * TH) / TH;             // 0=层底 1=层顶
+    var baseR = TREE_R * (1 - y / TREE_H);
+    // 每层底部外扩、顶部收拢 → 层叠枝叶轮廓
+    var rmax = baseR * (1.08 - 0.55 * local);
+    var shell = Math.pow(Math.random(), 0.26);    // 越接近1越靠外表面
+    var r = rmax * shell + (Math.random() - 0.5) * 0.06;
+    var a = Math.random() * Math.PI * 2;
+    bPos[i*3]   = Math.cos(a) * r;
+    bPos[i*3+1] = y;
+    bPos[i*3+2] = Math.sin(a) * r;
+    scatterStart(bStart, i, 16, -4, 20);
+    // 颜色：内部深绿 → 表层雪霜白；层底边缘更亮
+    var surface = Math.pow(shell, 3.0);
+    var edge = local < 0.22 ? (1 - local / 0.22) : 0;
+    bc.copy(cIn).lerp(cFrost, Math.min(1, surface * 1.2));
+    if (edge > 0) bc.lerp(cEdge, edge * 0.85 * (0.4 + surface));
+    bc.multiplyScalar(1.45);   // 提亮树冠，让轮廓清晰
+    bCol[i*3] = bc.r; bCol[i*3+1] = bc.g; bCol[i*3+2] = bc.b;
+    bPhase[i] = Math.random();
+    bSize[i] = 0.06 + Math.random() * 0.09;
+    bDelay[i] = Math.max(0, passTime(y) - BUILD_DUR * 0.75) + Math.random() * 0.12; // 跟随彗星成型
+  }
+  var bodyGeo = new THREE.BufferGeometry();
+  bodyGeo.setAttribute('position', new THREE.BufferAttribute(bPos, 3));
+  bodyGeo.setAttribute('aStart', new THREE.BufferAttribute(bStart, 3));
+  bodyGeo.setAttribute('aColor', new THREE.BufferAttribute(bCol, 3));
+  bodyGeo.setAttribute('aPhase', new THREE.BufferAttribute(bPhase, 1));
+  bodyGeo.setAttribute('aSize', new THREE.BufferAttribute(bSize, 1));
+  bodyGeo.setAttribute('aDelay', new THREE.BufferAttribute(bDelay, 1));
+  treeGroup.add(new THREE.Points(bodyGeo, buildMat));
+
+  /* ---------- 螺旋光带（金 / 冰蓝 / 粉，缠绕树身） ---------- */
+  var RIBBONS = [
+    { color: 0xffc9e4, turns: 5.2, offset: 0.0, count: isMobile ? 900 : 1500, size: 0.16 },
+    { color: 0xff6bb5, turns: 4.2, offset: 2.1, count: isMobile ? 900 : 1500, size: 0.15 },
+    { color: 0xff9ad0, turns: 6.0, offset: 4.2, count: isMobile ? 800 : 1300, size: 0.14 }
+  ];
+  RIBBONS.forEach(function (R) {
+    var n = R.count;
+    var pos = new Float32Array(n * 3);
+    var start = new Float32Array(n * 3);
+    var col = new Float32Array(n * 3);
+    var phase = new Float32Array(n);
+    var size = new Float32Array(n);
+    var delay = new Float32Array(n);
+    var rc = new THREE.Color(R.color);
+    for (var k = 0; k < n; k++) {
+      var t = k / n;                                            // 沿螺旋顺序
+      var ang = t * R.turns * Math.PI * 2 + R.offset + (Math.random() - 0.5) * 0.06;
+      // 层次结节：每绕一圈，半径由外扩收到内收，形成一圈圈"裙边"
+      var tf = (t * R.turns) % 1;
+      var mod = 1.16 - 0.48 * tf;                               // 圈底外扩 → 圈顶收拢
+      var rr = (TREE_R * 1.0) * (1 - t) * mod * (0.97 + Math.random() * 0.05) + 0.05;
+      pos[k*3]   = Math.cos(ang) * rr;
+      pos[k*3+1] = 0.25 + t * (TREE_H * 0.93);
+      pos[k*3+2] = Math.sin(ang) * rr;
+      scatterStart(start, k, 16, -4, 20);
+      var vary = 0.75 + Math.random() * 0.5;
+      if (tf < 0.14) {                                          // 每圈起始处是"结节"，更亮更大
+        var node = 1 - tf / 0.14;
+        vary *= 1 + node * 0.6;
+        size[k] = R.size * (0.6 + Math.random() * 0.9) * (1 + node * 0.9);
+      } else {
+        size[k] = R.size * (0.6 + Math.random() * 0.9);
+      }
+      col[k*3] = rc.r * vary; col[k*3+1] = rc.g * vary; col[k*3+2] = rc.b * vary;
+      phase[k] = Math.random();
+      delay[k] = Math.max(0, passTime(pos[k*3+1]) - BUILD_DUR * 0.55) + Math.random() * 0.1; // 随彗星盘旋而上
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aStart', new THREE.BufferAttribute(start, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aDelay', new THREE.BufferAttribute(delay, 1));
+    treeGroup.add(new THREE.Points(geo, buildMat));
+  });
+
+  /* ---------- 树干（暖金微光） ---------- */
+  var TRUNK_COUNT = 600;
+  var kPos = new Float32Array(TRUNK_COUNT * 3);
+  var kStart = new Float32Array(TRUNK_COUNT * 3);
+  var kCol = new Float32Array(TRUNK_COUNT * 3);
+  var kPhase = new Float32Array(TRUNK_COUNT);
+  var kSize = new Float32Array(TRUNK_COUNT);
+  var kDelay = new Float32Array(TRUNK_COUNT);
+  var cTrunk = new THREE.Color(0xe89ac4);
+  for (var tk = 0; tk < TRUNK_COUNT; tk++) {
+    var ta = Math.random() * Math.PI * 2;
+    var tr = 0.22 + Math.random() * 0.28;
+    kPos[tk*3]   = Math.cos(ta) * tr;
+    kPos[tk*3+1] = Math.random() * 1.4;
+    kPos[tk*3+2] = Math.sin(ta) * tr;
+    scatterStart(kStart, tk, 14, -3, 14);
+    var tv = 0.6 + Math.random() * 0.8;
+    kCol[tk*3] = cTrunk.r * tv; kCol[tk*3+1] = cTrunk.g * tv * 0.85; kCol[tk*3+2] = cTrunk.b * tv * 0.6;
+    kPhase[tk] = Math.random();
+    kSize[tk] = 0.07 + Math.random() * 0.07;
+    kDelay[tk] = Math.random() * 0.5;                            // 树干最先出现
+  }
+  var trunkGeo = new THREE.BufferGeometry();
+  trunkGeo.setAttribute('position', new THREE.BufferAttribute(kPos, 3));
+  trunkGeo.setAttribute('aStart', new THREE.BufferAttribute(kStart, 3));
+  trunkGeo.setAttribute('aColor', new THREE.BufferAttribute(kCol, 3));
+  trunkGeo.setAttribute('aPhase', new THREE.BufferAttribute(kPhase, 1));
+  trunkGeo.setAttribute('aSize', new THREE.BufferAttribute(kSize, 1));
+  trunkGeo.setAttribute('aDelay', new THREE.BufferAttribute(kDelay, 1));
+  treeGroup.add(new THREE.Points(trunkGeo, buildMat));
+
+  /* ---------- 彩灯粒子（树成型后亮起，呼吸闪烁） ---------- */
+  var LIGHT_COLORS = [0xff6bb5, 0xffa8d8, 0xffd6ea, 0xd9a7ff, 0xfff0f8];
+  var cTmp = new THREE.Color();
+  function cTmp_set(arr, idx, hex) {
+    cTmp.set(hex);
+    arr[idx*3] = cTmp.r; arr[idx*3+1] = cTmp.g; arr[idx*3+2] = cTmp.b;
+  }
+  var LIGHT_COUNT = isMobile ? 450 : 750;
+  var lPos = new Float32Array(LIGHT_COUNT * 3);
+  var lStart = new Float32Array(LIGHT_COUNT * 3);
+  var lCol = new Float32Array(LIGHT_COUNT * 3);
+  var lPhase = new Float32Array(LIGHT_COUNT);
+  var lSize = new Float32Array(LIGHT_COUNT);
+  var lDelay = new Float32Array(LIGHT_COUNT);
+  for (var j = 0; j < LIGHT_COUNT; j++) {
+    var ly = Math.pow(Math.random(), 0.75) * (TREE_H - 0.4);
+    var tierL = Math.min(TIERS - 1, Math.floor(ly / TH));
+    var localL = (ly - tierL * TH) / TH;
+    var lr = TREE_R * (1 - ly / TREE_H) * (1.08 - 0.55 * localL) * (0.98 + Math.random() * 0.06);
+    var la = Math.random() * Math.PI * 2;
+    lPos[j*3]   = Math.cos(la) * lr;
+    lPos[j*3+1] = ly + 0.1;
+    lPos[j*3+2] = Math.sin(la) * lr;
+    scatterStart(lStart, j, 18, -3, 18);
+    cTmp_set(lCol, j, LIGHT_COLORS[(Math.random() * LIGHT_COLORS.length) | 0]);
+    lPhase[j] = Math.random();
+    lSize[j] = 0.36 + Math.random() * 0.34;
+    lDelay[j] = passTime(ly) + 0.15 + Math.random() * 0.25;      // 彗星经过后亮起
+  }
+  var lightGeo = new THREE.BufferGeometry();
+  lightGeo.setAttribute('position', new THREE.BufferAttribute(lPos, 3));
+  lightGeo.setAttribute('aStart', new THREE.BufferAttribute(lStart, 3));
+  lightGeo.setAttribute('aColor', new THREE.BufferAttribute(lCol, 3));
+  lightGeo.setAttribute('aPhase', new THREE.BufferAttribute(lPhase, 1));
+  lightGeo.setAttribute('aSize', new THREE.BufferAttribute(lSize, 1));
+  lightGeo.setAttribute('aDelay', new THREE.BufferAttribute(lDelay, 1));
+  var lightUniforms = { uTime: { value: 0 }, uPR: { value: DPR }, uBuildDur: { value: BUILD_DUR } };
+  var lightMat = new THREE.ShaderMaterial({
+    uniforms: lightUniforms,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: [
+      'attribute vec3 aStart;',
+      'attribute vec3 aColor;',
+      'attribute float aPhase, aSize, aDelay;',
+      'uniform float uTime, uPR, uBuildDur;',
+      'varying vec3 vColor;',
+      'varying float vA;',
+      EASE_GLSL,
+      'void main() {',
+      '  float p = clamp((uTime - aDelay) / uBuildDur, 0.0, 1.0);',
+      '  float e = easeOut(p);',
+      '  vec3 pos = mix(aStart, position, e);',
+      '  float ang = (1.0 - e) * (4.0 + aPhase * 5.0);',
+      '  float ca = cos(ang), sa = sin(ang);',
+      '  pos.xz = mat2(ca, -sa, sa, ca) * pos.xz;',
+      '  vec4 mv = modelViewMatrix * vec4(pos, 1.0);',
+      '  float b = 0.55 + 0.45 * sin(uTime * (1.2 + aPhase * 1.8) + aPhase * 6.2831);',
+      '  vA = e * (0.5 + 0.5 * b);',
+      '  vColor = aColor * (1.0 + b * 1.3);',
+      '  gl_PointSize = aSize * (0.7 + 0.5 * b) * uPR * (170.0 / max(1.0, -mv.z)) * (0.3 + 0.7 * e);',
+      '  gl_Position = projectionMatrix * mv;',
+      '}'
+    ].join('\n'),
+    fragmentShader: SOFT_FRAG
+  });
+  treeGroup.add(new THREE.Points(lightGeo, lightMat));
+
+  /* ================= 开场双烟花彗星（一金一粉，螺旋盘绕构成圣诞树） ================= */
+  var COMET_DEFS = [
+    { color: 0xff9ad0, phase: 0 },            // 亮粉
+    { color: 0xffd6ea, phase: Math.PI }       // 浅粉（对侧）
+  ];
+  var comets = COMET_DEFS.map(function (C) {
+    var head = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: C.color, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    head.scale.set(1.6, 1.6, 1);
+    treeGroup.add(head);
+    var core = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: 0xffffff, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    core.scale.set(0.6, 0.6, 1);
+    treeGroup.add(core);
+    // 彗星尾迹（拉长光晕）
+    var tail = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: C.color, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    }));
+    tail.scale.set(2.6, 0.9, 1);
+    treeGroup.add(tail);
+    return { head: head, core: core, tail: tail, phase: C.phase };
+  });
+
+  /* ================= 顶部金色五角星（树成型时爆发点亮） ================= */
+  function makeStarTexture(size) {
+    size = size || 256;
+    var c = document.createElement('canvas');
+    c.width = c.height = size;
+    var g = c.getContext('2d');
+    var cx = size/2, cy = size/2, R = size * 0.30, r2 = size * 0.115;
+    var grd = g.createRadialGradient(cx, cy, 0, cx, cy, size/2);
+    grd.addColorStop(0, 'rgba(255,230,245,0.95)');
+    grd.addColorStop(0.22, 'rgba(255,160,210,0.45)');
+    grd.addColorStop(0.55, 'rgba(255,120,190,0.12)');
+    grd.addColorStop(1, 'rgba(255,100,170,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, size, size);
+    g.beginPath();
+    for (var k = 0; k < 10; k++) {
+      var rad = (k % 2 === 0) ? R : r2;
+      var ang = -Math.PI/2 + k * Math.PI/5;
+      var x = cx + Math.cos(ang) * rad, yy = cy + Math.sin(ang) * rad;
+      if (k === 0) g.moveTo(x, yy); else g.lineTo(x, yy);
+    }
+    g.closePath();
+    g.fillStyle = '#ffeaf6';
+    g.shadowColor = '#ff9ad0';
+    g.shadowBlur = size * 0.06;
+    g.fill();
+    var tex = new THREE.CanvasTexture(c);
+    tex.needsUpdate = true;
+    return tex;
+  }
+  var STAR_POS = new THREE.Vector3(0, TREE_H + 0.85, 0);
+  var starMat = new THREE.SpriteMaterial({
+    map: makeStarTexture(256), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
+  });
+  var star = new THREE.Sprite(starMat);
+  star.position.copy(STAR_POS);
+  star.scale.set(0.001, 0.001, 1);
+  treeGroup.add(star);
+
+  var starCore = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: 0xffd6ea, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  }));
+  starCore.position.copy(STAR_POS);
+  starCore.scale.set(0.001, 0.001, 1);
+  treeGroup.add(starCore);
+
+  var flashMat = new THREE.SpriteMaterial({
+    map: glowTex, color: 0xffc4e1, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  var flash = new THREE.Sprite(flashMat);
+  flash.position.copy(STAR_POS);
+  flash.scale.set(14, 14, 1);
+  treeGroup.add(flash);
+
+  var ringMat = new THREE.SpriteMaterial({
+    map: glowTex, color: 0xff9ad0, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  var ring = new THREE.Sprite(ringMat);
+  ring.position.copy(STAR_POS);
+  treeGroup.add(ring);
+
+  /* ================= 金色烟花（树成型后周期绽放） ================= */
+  var FW_BURSTS = isMobile ? 4 : 6;
+  var FW_PER = isMobile ? 260 : 380;
+  var fwFlashes = [];
+  function makeBurstFlash(color, x, y, z) {
+    var fm = new THREE.SpriteMaterial({ map: glowTex, color: color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+    var fs2 = new THREE.Sprite(fm); fs2.position.set(x, y, z); fs2.scale.set(3, 3, 1); scene.add(fs2);
+    var rm = new THREE.SpriteMaterial({ map: glowTex, color: color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+    var rs2 = new THREE.Sprite(rm); rs2.position.set(x, y, z); scene.add(rs2);
+    return { flash: fs2, ring: rs2 };
+  }
+  var FW_COUNT = FW_BURSTS * FW_PER;
+  var fPos = new Float32Array(FW_COUNT * 3);
+  var fVel = new Float32Array(FW_COUNT * 3);
+  var fCol = new Float32Array(FW_COUNT * 3);
+  var fBirth = new Float32Array(FW_COUNT);
+  var fSize = new Float32Array(FW_COUNT);
+  var FW_COLORS = [0xff8ac8, 0xffb7d9, 0xff6bb5, 0xffe3f2];
+  var FW_C = new THREE.Color();
+  var idx = 0;
+  for (var b = 0; b < FW_BURSTS; b++) {
+    var ox = (Math.random() - 0.5) * 18;
+    var oy = 8 + Math.random() * 6;
+    var oz = -8 + Math.random() * 6;
+    var birth = BUILD_END + 0.4 + b * 2.3 + Math.random() * 0.8;
+    for (var f = 0; f < FW_PER; f++, idx++) {
+      fPos[idx*3] = ox; fPos[idx*3+1] = oy; fPos[idx*3+2] = oz;
+      var va = Math.random() * Math.PI * 2;
+      var vp = Math.acos(2 * Math.random() - 1);
+      var vs = 3.2 + Math.random() * 5.2;
+      fVel[idx*3]   = Math.sin(vp) * Math.cos(va) * vs;
+      fVel[idx*3+1] = Math.cos(vp) * vs;
+      fVel[idx*3+2] = Math.sin(vp) * Math.sin(va) * vs;
+      FW_C.set(FW_COLORS[(Math.random() * FW_COLORS.length) | 0]);
+      fCol[idx*3] = FW_C.r; fCol[idx*3+1] = FW_C.g; fCol[idx*3+2] = FW_C.b;
+      fBirth[idx] = birth;
+      fSize[idx] = 0.12 + Math.random() * 0.2;
+    }
+    var ff = makeBurstFlash(FW_COLORS[(Math.random() * FW_COLORS.length) | 0], ox, oy, oz);
+    ff.birth = birth;
+    ff.cycle = 14;
+    fwFlashes.push(ff);
+  }
+  var fwGeo = new THREE.BufferGeometry();
+  fwGeo.setAttribute('position', new THREE.BufferAttribute(fPos, 3));
+  fwGeo.setAttribute('aVel', new THREE.BufferAttribute(fVel, 3));
+  fwGeo.setAttribute('aColor', new THREE.BufferAttribute(fCol, 3));
+  fwGeo.setAttribute('aBirth', new THREE.BufferAttribute(fBirth, 1));
+  fwGeo.setAttribute('aSize', new THREE.BufferAttribute(fSize, 1));
+  var fwUniforms = { uTime: { value: 0 }, uPR: { value: DPR } };
+  var fwMat = new THREE.ShaderMaterial({
+    uniforms: fwUniforms,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: [
+      'attribute vec3 aVel;',
+      'attribute vec3 aColor;',
+      'attribute float aBirth, aSize;',
+      'uniform float uTime, uPR;',
+      'varying vec3 vColor;',
+      'varying float vA;',
+      'void main() {',
+      '  float cycle = 14.0;',
+      '  float dur = 2.8;',
+      '  float life = mod(uTime - aBirth, cycle);',
+      '  float lp = clamp(life / dur, 0.0, 1.0);',
+      '  vec3 pos = position + aVel * life * (1.0 - 0.16 * life);',
+      '  pos.y -= 0.5 * life * life * 0.45;',
+      '  vec4 mv = modelViewMatrix * vec4(pos, 1.0);',
+      '  float fade = 1.0 - lp;',
+      '  vA = fade * fade * step(0.001, life) * step(life, dur);',
+      '  vColor = aColor;',
+      '  gl_PointSize = aSize * uPR * (330.0 / max(1.0, -mv.z));',
+      '  gl_Position = projectionMatrix * mv;',
+      '}'
+    ].join('\n'),
+    fragmentShader: SOFT_FRAG
+  });
+  scene.add(new THREE.Points(fwGeo, fwMat));
+
+  /* ================= 开场烟花（全屏绽放，中间两颗最亮的盘绕成树） ================= */
+  var INTRO_BURSTS = [
+    // 第一波（0.2~1.1s）
+    { color: 0xff8ac8, birth: 0.20, x: -9,  y: 11, z: -4 },
+    { color: 0xffb7d9, birth: 0.40, x: 10,  y: 6,  z: -2 },
+    { color: 0xff6bb5, birth: 0.65, x: -12, y: 4,  z: -3 },
+    { color: 0xffd6ea, birth: 0.85, x: 13,  y: 13, z: -5 },
+    { color: 0xff9ad0, birth: 1.05, x: 6,   y: 16, z: -6 },
+    { color: 0xffc0dd, birth: 0.30, x: -5,  y: 15, z: -5 },
+    // 第二波（1.6~2.7s）
+    { color: 0xffa8d8, birth: 1.65, x: -13, y: 13, z: -4 },
+    { color: 0xff8ac8, birth: 1.90, x: 11,  y: 3,  z: -2 },
+    { color: 0xff6bb5, birth: 2.15, x: -7,  y: 8,  z: -3 },
+    { color: 0xffd6ea, birth: 2.40, x: 8,   y: 14, z: -5 },
+    { color: 0xff9ad0, birth: 2.65, x: 0,   y: 17, z: -6 },
+    // 收尾：树底双响，引出两颗彗星（3.3s）
+    { color: 0xffb7d9, birth: 3.30, x: -1.4, y: 1.6, z: 0 },
+    { color: 0xffd6ea, birth: 3.42, x: 1.4,  y: 1.2, z: 0 }
+  ];
+  var INTRO_PER = isMobile ? 240 : 400;
+  var INTRO_COUNT = INTRO_BURSTS.length * INTRO_PER;
+  var iPos = new Float32Array(INTRO_COUNT * 3);
+  var iVel = new Float32Array(INTRO_COUNT * 3);
+  var iCol = new Float32Array(INTRO_COUNT * 3);
+  var iBirth = new Float32Array(INTRO_COUNT);
+  var iSize = new Float32Array(INTRO_COUNT);
+  var IC = new THREE.Color();
+  idx = 0;
+  INTRO_BURSTS.forEach(function (B) {
+    for (var f2 = 0; f2 < INTRO_PER; f2++, idx++) {
+      iPos[idx*3] = B.x; iPos[idx*3+1] = B.y; iPos[idx*3+2] = B.z;
+      var iva = Math.random() * Math.PI * 2;
+      var ivp = Math.acos(2 * Math.random() - 1);
+      var ivs = 3.5 + Math.random() * 5.5;
+      iVel[idx*3]   = Math.sin(ivp) * Math.cos(iva) * ivs;
+      iVel[idx*3+1] = Math.cos(ivp) * ivs;
+      iVel[idx*3+2] = Math.sin(ivp) * Math.sin(iva) * ivs;
+      if (Math.random() < 0.7) IC.set(B.color); else IC.set(0xfff0f8);
+      IC.multiplyScalar(1.25);
+      iCol[idx*3] = IC.r; iCol[idx*3+1] = IC.g; iCol[idx*3+2] = IC.b;
+      iBirth[idx] = B.birth;
+      iSize[idx] = 0.12 + Math.random() * 0.2;
+    }
+  });
+  var introGeo = new THREE.BufferGeometry();
+  introGeo.setAttribute('position', new THREE.BufferAttribute(iPos, 3));
+  introGeo.setAttribute('aVel', new THREE.BufferAttribute(iVel, 3));
+  introGeo.setAttribute('aColor', new THREE.BufferAttribute(iCol, 3));
+  introGeo.setAttribute('aBirth', new THREE.BufferAttribute(iBirth, 1));
+  introGeo.setAttribute('aSize', new THREE.BufferAttribute(iSize, 1));
+  var introUniforms = { uTime: { value: 0 }, uPR: { value: DPR } };
+  var introMat = new THREE.ShaderMaterial({
+    uniforms: introUniforms,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: [
+      'attribute vec3 aVel;',
+      'attribute vec3 aColor;',
+      'attribute float aBirth, aSize;',
+      'uniform float uTime, uPR;',
+      'varying vec3 vColor;',
+      'varying float vA;',
+      'void main() {',
+      '  float dur = 2.6;',
+      '  float life = uTime - aBirth;',
+      '  float lp = clamp(life / dur, 0.0, 1.0);',
+      '  vec3 pos = position + aVel * life * (1.0 - 0.16 * life);',
+      '  pos.y -= 0.5 * life * life * 0.42;',
+      '  vec4 mv = modelViewMatrix * vec4(pos, 1.0);',
+      '  float fade = 1.0 - lp;',
+      '  vA = fade * fade * step(0.0, life) * step(life, dur);',
+      '  vColor = aColor;',
+      '  gl_PointSize = aSize * uPR * (330.0 / max(1.0, -mv.z));',
+      '  gl_Position = projectionMatrix * mv;',
+      '}'
+    ].join('\n'),
+    fragmentShader: SOFT_FRAG
+  });
+  scene.add(new THREE.Points(introGeo, introMat));
+
+  // 每朵开场烟花的爆心闪光 + 扩散光环
+  var introFlashes = [];
+  INTRO_BURSTS.forEach(function (B2) {
+    var ifl = makeBurstFlash(B2.color, B2.x, B2.y, B2.z);
+    ifl.birth = B2.birth;
+    introFlashes.push(ifl);
+  });
+
+  /* ================= 地面光池（暖金+粉，树成型后浮现） ================= */
+  function makeGroundTexture() {
+    var c = document.createElement('canvas');
+    c.width = c.height = 256;
+    var g = c.getContext('2d');
+    var grd = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grd.addColorStop(0, 'rgba(255,225,242,0.5)');
+    grd.addColorStop(0.3, 'rgba(255,150,205,0.24)');
+    grd.addColorStop(0.6, 'rgba(255,120,190,0.11)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 256, 256);
+    var tex = new THREE.CanvasTexture(c);
+    tex.needsUpdate = true;
+    return tex;
+  }
+  var groundMat = new THREE.MeshBasicMaterial({
+    map: makeGroundTexture(), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending
+  });
+  var ground = new THREE.Mesh(new THREE.PlaneGeometry(13, 13), groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = 0.02;
+  scene.add(ground);
+
+  /* ================= 多层景深雪花（开场淡入） ================= */
+  var SNOW_LAYERS = [
+    { count: isMobile ? 350 : 650, area: 64, top: 26, h: 30, sizeMin: 0.5, sizeMax: 1.0, speedMin: 0.5, speedMax: 0.9, sway: 1.1, alpha: 0.5 },
+    { count: isMobile ? 260 : 480, area: 50, top: 24, h: 28, sizeMin: 0.9, sizeMax: 1.7, speedMin: 0.9, speedMax: 1.5, sway: 1.6, alpha: 0.7 },
+    { count: isMobile ? 140 : 260, area: 44, top: 22, h: 26, sizeMin: 1.6, sizeMax: 3.0, speedMin: 1.3, speedMax: 2.1, sway: 2.2, alpha: 0.95 }
+  ];
+  var snowMats = [];
+  SNOW_LAYERS.forEach(function (L) {
+    var n = L.count;
+    var pos = new Float32Array(n * 3);
+    var col = new Float32Array(n * 3);
+    var phase = new Float32Array(n);
+    var size = new Float32Array(n);
+    var speed = new Float32Array(n);
+    var spark = new Float32Array(n);
+    for (var i2 = 0; i2 < n; i2++) {
+      pos[i2*3]   = (Math.random() - 0.5) * L.area;
+      pos[i2*3+1] = Math.random() * L.h;
+      pos[i2*3+2] = (Math.random() - 0.5) * L.area;
+      if (Math.random() < 0.22) { col[i2*3] = 1.0; col[i2*3+1] = 0.72; col[i2*3+2] = 0.86; }
+      else {
+        var w = 0.85 + Math.random() * 0.15;
+        col[i2*3] = w; col[i2*3+1] = w; col[i2*3+2] = Math.min(1, w + 0.08);
+      }
+      phase[i2] = Math.random();
+      size[i2] = L.sizeMin + Math.random() * (L.sizeMax - L.sizeMin);
+      speed[i2] = L.speedMin + Math.random() * (L.speedMax - L.speedMin);
+      spark[i2] = Math.random() < 0.12 ? 1.0 : 0.0;
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+    geo.setAttribute('aSpark', new THREE.BufferAttribute(spark, 1));
+    var mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 }, uPR: { value: DPR },
+        uTop: { value: L.top }, uHeight: { value: L.h },
+        uSway: { value: L.sway }, uAlpha: { value: 0 }
+      },
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      vertexShader: [
+        'attribute vec3 aColor;',
+        'attribute float aPhase, aSize, aSpeed, aSpark;',
+        'uniform float uTime, uPR, uTop, uHeight, uSway;',
+        'varying vec3 vColor;',
+        'varying float vA;',
+        'void main() {',
+        '  vec3 p = position;',
+        '  float fall = mod(position.y - uTime * aSpeed, uHeight);',
+        '  p.y = uTop - fall;',
+        '  float t2 = uTime * 0.7 + aPhase * 6.2831;',
+        '  p.x += sin(t2) * uSway;',
+        '  p.z += cos(t2 * 0.83) * uSway * 0.6;',
+        '  vec4 mv = modelViewMatrix * vec4(p, 1.0);',
+        '  float tw = 1.0 + aSpark * 0.7 * sin(uTime * 3.0 + aPhase * 12.0);',
+        '  vA = (0.55 + 0.45 * aSpark) * tw;',
+        '  vColor = aColor;',
+        '  gl_PointSize = aSize * uPR * (170.0 / max(1.0, -mv.z));',
+        '  gl_Position = projectionMatrix * mv;',
+        '}'
+      ].join('\n'),
+      fragmentShader: [
+        'uniform float uAlpha;',
+        'varying vec3 vColor;',
+        'varying float vA;',
+        'void main() {',
+        '  float d = length(gl_PointCoord - 0.5);',
+        '  float a = smoothstep(0.5, 0.06, d);',
+        '  gl_FragColor = vec4(vColor, a * vA * uAlpha);',
+        '}'
+      ].join('\n')
+    });
+    mat.userData.target = L.alpha;
+    snowMats.push(mat);
+    scene.add(new THREE.Points(geo, mat));
+  });
+
+  /* ================= 动画循环（60帧） ================= */
+  var clock = new THREE.Clock();
+  function animate() {
+    requestAnimationFrame(animate);
+    var t = clock.getElapsedTime();
+
+    treeGroup.rotation.y += 0.0022;
+
+    buildMat.uniforms.uTime.value = t;
+    lightUniforms.uTime.value = t;
+    fwUniforms.uTime.value = t;
+    introUniforms.uTime.value = t;
+    for (var s = 0; s < snowMats.length; s++) snowMats[s].uniforms.uTime.value = t;
+
+    // 双烟花彗星：螺旋盘绕上升，飞过之处树身成型
+    if (t < COMET_END + 0.6) {
+      var cp = Math.min(1, Math.max(0, (t - COMET_START) / (COMET_END - COMET_START)));
+      var cy = cp * TREE_H;
+      var crank = cp * COMET_TURNS * Math.PI * 2;
+      // 与光带一致的结节起伏：每圈底外扩、圈顶收拢
+      var ctf = (cp * COMET_TURNS) % 1;
+      var cmod = 1.16 - 0.48 * ctf;
+      var cr = Math.max(0.03, TREE_R * (1 - cp) * 0.95 * cmod + 0.05);
+      var fadeIn = Math.min(1, Math.max(0, (t - COMET_START + 0.3) * 3));
+      var fadeOut = t > COMET_END ? Math.max(0, 1 - (t - COMET_END) * 3.5) : 1;
+      var cVis = fadeIn * fadeOut;
+      for (var ci = 0; ci < comets.length; ci++) {
+        var cm = comets[ci];
+        var ca2 = crank + cm.phase;
+        var cx2 = Math.cos(ca2) * cr, cz2 = Math.sin(ca2) * cr;
+        cm.head.position.set(cx2, cy, cz2);
+        cm.core.position.set(cx2, cy, cz2);
+        // 尾迹拖在运动反方向
+        var tx = Math.cos(ca2 + 0.35) * cr, tz = Math.sin(ca2 + 0.35) * cr;
+        cm.tail.position.set(tx, Math.max(0, cy - 0.35), tz);
+        var flicker = 0.9 + 0.35 * Math.sin(t * 30 + ci * 5);
+        cm.head.scale.set(2.3 * flicker * cVis + 0.001, 2.3 * flicker * cVis + 0.001, 1);
+        cm.core.scale.set(0.85 * cVis + 0.001, 0.85 * cVis + 0.001, 1);
+        cm.tail.scale.set(3.2 * cVis + 0.001, 1.1 * cVis + 0.001, 1);
+        cm.head.material.opacity = cVis;
+        cm.core.material.opacity = cVis;
+        cm.tail.material.opacity = cVis * 0.5;
+      }
+    }
+
+    var fadeNebula = Math.min(1, t / 3);
+    for (var nm = 0; nm < nebulaMats.length; nm++)
+      nebulaMats[nm].opacity = nebulaMats[nm].userData.target * fadeNebula;
+    var fadeSnow = Math.min(1, Math.max(0, (t - 1.5) / 4));
+    for (var sm = 0; sm < snowMats.length; sm++)
+      snowMats[sm].uniforms.uAlpha.value = snowMats[sm].userData.target * fadeSnow;
+
+    if (t < BUILD_END) {
+      star.scale.set(0.001, 0.001, 1);
+      starCore.scale.set(0.001, 0.001, 1);
+    } else {
+      var q = t - BUILD_END;
+      var elastic = 1 + 0.55 * Math.exp(-q * 2.6) * Math.sin(q * 9.0);
+      var base = Math.min(1, q * 4.0);
+      var pulse = 1 + 0.1 * Math.sin(t * 2.0);
+      var sc = 2.6 * base * elastic * pulse;
+      star.scale.set(sc, sc, 1);
+      starMat.opacity = Math.min(1, q * 2.5) * (0.85 + 0.15 * Math.sin(t * 2.0));
+      var cc = 1.2 * base * elastic * pulse;
+      starCore.scale.set(cc, cc, 1);
+      flashMat.opacity = Math.max(0, Math.exp(-q * 3.2) * 1.6);
+      var rq = Math.min(1, q / 1.4);
+      ring.scale.set(0.5 + rq * 13, 0.5 + rq * 13, 1);
+      ringMat.opacity = Math.max(0, (1 - rq) * 0.55);
+    }
+
+    var gFade = Math.min(1, Math.max(0, (t - 6.8) / 1.6));
+    groundMat.opacity = (0.85 + 0.15 * Math.sin(t * 1.4)) * gFade;
+
+    // 烟花爆心闪光 + 扩散冲击环
+    var allFlashes = fwFlashes.concat(introFlashes);
+    for (var fi = 0; fi < allFlashes.length; fi++) {
+      var FF = allFlashes[fi];
+      var fl = t - FF.birth;
+      if (FF.cycle && fl > 0) fl = fl % FF.cycle;
+      var vis = fl > 0 && fl < 1.3;
+      FF.flash.material.opacity = vis ? Math.exp(-fl * 5) * 1.8 : 0;
+      FF.ring.material.opacity = vis ? Math.max(0, 1 - fl / 1.3) * 0.5 : 0;
+      if (vis) {
+        var fsc = 3 + fl * 15;
+        FF.flash.scale.set(fsc, fsc, 1);
+        var rsc = 2 + fl * 17;
+        FF.ring.scale.set(rsc, rsc, 1);
+      }
+    }
+
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  /* ================= 自适应 ================= */
+  window.addEventListener('resize', function () {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+})();
+</script>
+</body>
+</html>
